@@ -114,30 +114,39 @@ export const getVolunteerNearbyAlertsController = async (req, res) => {
 
         const { latitude, longitude } = parsedCoordinates;
 
-        const alerts = await Alert.find({
-            $or: [
-                {
-                    mode: "Active",
-                    location: {
-                        $nearSphere: {
-                            $geometry: {
-                                type: "Point",
-                                coordinates: [longitude, latitude],
-                            },
-                            $maxDistance: 500,
-                        },
+        // MongoDB does not allow $near inside $or, so fetch and merge separately.
+        const activeNearbyAlerts = await Alert.find({
+            mode: "Active",
+            location: {
+                $nearSphere: {
+                    $geometry: {
+                        type: "Point",
+                        coordinates: [longitude, latitude],
                     },
+                    $maxDistance: 500,
                 },
-                {
-                    mode: "Alloted",
-                    volunteer_id: volunteer._id,
-                },
-            ],
+            },
         })
             .populate("user_id", "fullname email phone")
             .populate("volunteer_id", "email phone location mode")
-            .sort({ createdAt: -1 })
             .lean();
+
+        const allotedForVolunteer = await Alert.find({
+            mode: "Alloted",
+            volunteer_id: volunteer._id,
+        })
+            .populate("user_id", "fullname email phone")
+            .populate("volunteer_id", "email phone location mode")
+            .lean();
+
+        const mergedAlertsMap = new Map();
+        [...activeNearbyAlerts, ...allotedForVolunteer].forEach((alert) => {
+            mergedAlertsMap.set(alert._id.toString(), alert);
+        });
+
+        const alerts = Array.from(mergedAlertsMap.values()).sort(
+            (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+        );
 
         return res.status(200).json({ success: true, alerts });
     } catch (error) {
