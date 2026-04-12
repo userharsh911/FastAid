@@ -5,38 +5,40 @@ import Volunteer from "../model/volunteer.model.js";
 export const volunteerProtectedRoute = async(req,res,next)=>{
     try {
         const token = req.params?.token;
-        console.log("vol token ")
-        if(!token) res.status(402).send({success:false,message:"Unauthorized"})
+        if(!token) return res.status(402).json({success:false,message:"Unauthorized"})
+
         const {email} = verifyJSONwebToken(token);
-        console.log("meil ",email)
         const volunteer = await Volunteer.findOne({email});
-        if(!volunteer) res.status(402).send({success:false,message:"Unauthorized: Account not found"});
+        if(!volunteer) return res.status(402).json({success:false,message:"Unauthorized: Account not found"});
 
         req.volunteer = volunteer;
-        console.log("end")
         next();
     } catch (error) {
-        res.status(500).send({success:false,message:"Internal server error"});
         console.log("Error while verifying token ",error);
+        return res.status(500).json({success:false,message:"Internal server error"});
     }
 }
 export const userProtectedRoute = async(req,res,next)=>{
     try {
         const token = req.params?.token;
-        console.log("token ",token)
         const as_guest = req.body?.as_guest;
-        if(!token || as_guest) next();
+        if(!token && as_guest){
+            const user = await User.findOne({_id:as_guest});
+            if(!user) return res.status(402).json({success:false,message:"Unauthorized: Invalid credentials"});
+            req.user = user;
+            next()
+        }
         
-        if(!token) res.status(402).send({success:false,message:"Unauthorized"})
+        if(!token) return res.status(402).json({success:false,message:"Unauthorized"})
         const {email} = verifyJSONwebToken(token);
     
         const user = await User.findOne({email});
-        if(!user) res.status(402).send({success:false,message:"Unauthorized: Account not found"});
+        if(!user) return res.status(402).json({success:false,message:"Unauthorized: Account not found"});
 
         req.user = user;
         next();
     } catch (error) {
-        res.status(500).send({success:false,message:"Internal server error"});
         console.log("Error while verifying token ",error);
+        return res.status(500).json({success:false,message:"Internal server error"});
     }
 }

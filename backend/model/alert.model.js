@@ -1,9 +1,10 @@
 import mongoose, { Schema } from "mongoose"
 
 const alertSchema = new mongoose.Schema({
-    userid:{
+    user_id:{
         type:mongoose.Schema.Types.ObjectId,
-        ref:"User"
+        ref:"User",
+        required:true
     },
     location:{
         type:{
@@ -27,7 +28,19 @@ const alertSchema = new mongoose.Schema({
         imageId:{
             type:String
         }
-    }
+    },
+    volunteer_id:{
+        type:mongoose.Schema.Types.ObjectId,
+        ref:"Volunteer"
+    },
+    mode:{
+        type:String,
+        enum:["Active","Cancelled","End"]
+    },
+    volunteers:[{
+        type:mongoose.Schema.Types.ObjectId,
+        ref:"Volunteer"
+    }]
 },{timestamps:true});
 
 alertSchema.index({location:'2dsphere'});

@@ -16,7 +16,7 @@ const volunteerSchema = new mongoose.Schema({
     },
     mode:{
         type:String,
-        enum:['Available','Busy','Call'],
+        enum:['Available','Busy','Call','Alloted'],
         default:'Available',
         required:true
     },
@@ -31,6 +31,10 @@ const volunteerSchema = new mongoose.Schema({
             type:[Number],
             required:true
         }
+    },
+    push_token: {
+        type: String,
+        default: null
     }
 },{timestamps:true});
 
