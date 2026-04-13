@@ -25,6 +25,24 @@ const parseCoordinates = (coordinates) => {
     return { latitude, longitude };
 };
 
+const calculateDistanceMeters = ({ from, to }) => {
+    const earthRadius = 6371000;
+    const toRadians = (value) => (value * Math.PI) / 180;
+
+    const lat1 = toRadians(from.latitude);
+    const lat2 = toRadians(to.latitude);
+    const dLat = lat2 - lat1;
+    const dLon = toRadians(to.longitude - from.longitude);
+
+    const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(lat1) * Math.cos(lat2) *
+        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return earthRadius * c;
+};
+
 const toIdString = (value) => {
     if (!value) return null;
     if (typeof value === "string") return value;
@@ -248,20 +266,40 @@ export const volunteerSelectAlertController = async (req, res) => {
 
         const { latitude, longitude } = parsedCoordinates;
 
+        const alertToSelect = await Alert.findById(alertId)
+            .select("_id mode volunteer_id location")
+            .lean();
+
+        if (!alertToSelect) {
+            return res.status(404).json({ success: false, message: "Alert not found" });
+        }
+
+        if (alertToSelect.mode !== "Active" || alertToSelect.volunteer_id) {
+            return res.status(409).json({ success: false, message: "Alert is not available anymore" });
+        }
+
+        const parsedAlertCoordinates = parseCoordinates(alertToSelect?.location?.coordinates);
+        if (!parsedAlertCoordinates) {
+            return res.status(400).json({ success: false, message: "Alert coordinates are invalid" });
+        }
+
+        const distanceMeters = calculateDistanceMeters({
+            from: { latitude, longitude },
+            to: parsedAlertCoordinates,
+        });
+
+        if (distanceMeters > 500) {
+            return res.status(403).json({
+                success: false,
+                message: "You can select alerts only within 500 meters",
+            });
+        }
+
         const selectedAlert = await Alert.findOneAndUpdate(
             {
                 _id: alertId,
                 mode: "Active",
                 volunteer_id: null,
-                location: {
-                    $nearSphere: {
-                        $geometry: {
-                            type: "Point",
-                            coordinates: [longitude, latitude],
-                        },
-                        $maxDistance: 500,
-                    },
-                },
             },
             {
                 $set: {
@@ -313,17 +351,45 @@ export const getAlertStatusController = async (req, res) => {
             return res.status(404).json({ success: false, message: "Alert not found" });
         }
 
-        const volunteerIdsSet = new Set((alert.volunteers || []).map((id) => id.toString()));
-        const assignedVolunteerId = alert.volunteer_id?._id?.toString() || alert.volunteer_id?.toString();
-        if (assignedVolunteerId) {
-            volunteerIdsSet.add(assignedVolunteerId);
+        const parsedAlertCoordinates = parseCoordinates(alert?.location?.coordinates);
+        if (!parsedAlertCoordinates) {
+            return res.status(400).json({ success: false, message: "Alert coordinates are invalid" });
         }
 
-        const volunteerIds = Array.from(volunteerIdsSet);
+        const { latitude, longitude } = parsedAlertCoordinates;
 
-        const nearbyVolunteers = await Volunteer.find({ _id: { $in: volunteerIds } })
+        const dynamicNearbyVolunteers = await Volunteer.find({
+            location: {
+                $nearSphere: {
+                    $geometry: {
+                        type: "Point",
+                        coordinates: [longitude, latitude],
+                    },
+                    $maxDistance: 500,
+                },
+            },
+            mode: { $nin: ["Busy", "Alloted"] },
+        })
             .select("_id email phone location mode")
             .lean();
+
+        const nearbyVolunteersMap = new Map();
+
+        dynamicNearbyVolunteers.forEach((volunteer) => {
+            nearbyVolunteersMap.set(volunteer._id.toString(), volunteer);
+        });
+
+        if (alert?.volunteer_id?._id) {
+            nearbyVolunteersMap.set(alert.volunteer_id._id.toString(), {
+                _id: alert.volunteer_id._id,
+                email: alert.volunteer_id.email,
+                phone: alert.volunteer_id.phone,
+                location: alert.volunteer_id.location,
+                mode: alert.volunteer_id.mode,
+            });
+        }
+
+        const nearbyVolunteers = Array.from(nearbyVolunteersMap.values());
 
         return res.status(200).json({
             success: true,
