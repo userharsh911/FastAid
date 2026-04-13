@@ -460,64 +460,6 @@ export const getAlertStatusController = async (req, res) => {
     }
 };
 
-export const updateAlertLiveLocationController = async (req, res) => {
-    try {
-        const { alertId } = req.params;
-        const { coordinates } = req.body;
-
-        if (!alertId) {
-            return res.status(400).json({ success: false, message: "Alert id is required" });
-        }
-
-        const parsedCoordinates = parseCoordinates(coordinates);
-        if (!parsedCoordinates) {
-            return res.status(400).json({ success: false, message: "Invalid coordinates" });
-        }
-
-        const alert = await Alert.findOne({
-            _id: alertId,
-            user_id: req.user._id,
-        });
-
-        if (!alert) {
-            return res.status(404).json({ success: false, message: "Alert not found" });
-        }
-
-        if (alert.mode === "Cancelled" || alert.mode === "End") {
-            return res.status(409).json({
-                success: false,
-                message: "Alert is already closed. Location cannot be updated.",
-            });
-        }
-
-        const { latitude, longitude } = parsedCoordinates;
-
-        alert.location = {
-            type: "Point",
-            coordinates: [longitude, latitude],
-        };
-
-        await alert.save();
-
-        const updatedAlert = await hydrateAlert(alert._id);
-        notifyAlertRealtime(updatedAlert, "location-updated");
-
-        return res.status(200).json({
-            success: true,
-            message: "Alert live location updated",
-            alert: updatedAlert,
-        });
-    } catch (error) {
-        console.log("error while updating alert live location ", error);
-
-        if (error?.name === "CastError") {
-            return res.status(400).json({ success: false, message: "Invalid alert id" });
-        }
-
-        return res.status(500).json({ success: false, message: "Internal server error" });
-    }
-};
-
 export const getUserAlertHistoryController = async (req, res) => {
     try {
         await expireStaleActiveAlerts({ userId: req.user._id });
