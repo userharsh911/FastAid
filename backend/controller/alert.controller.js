@@ -5,7 +5,11 @@ import Alert from "../model/alert.model.js";
 import Volunteer from "../model/volunteer.model.js";
 
 const NEARBY_DISTANCE_METERS = 500;
-const AVAILABLE_VOLUNTEER_MODES = ["Available", "Call"];
+
+const isVolunteerModeEligibleForActiveAlerts = (mode) => {
+    const normalizedMode = String(mode || "").trim().toLowerCase();
+    return normalizedMode !== "busy" && normalizedMode !== "alloted";
+};
 
 const parseCoordinates = (coordinates) => {
     let latitude;
@@ -47,10 +51,8 @@ const calculateDistanceMeters = ({ from, to }) => {
 };
 
 const findNearbyVolunteers = async ({ latitude, longitude, maxDistance = NEARBY_DISTANCE_METERS, selectFields }) => {
-    const modeFilter = { $in: AVAILABLE_VOLUNTEER_MODES };
-
     try {
-        return Volunteer.find({
+        const volunteers = await Volunteer.find({
             location: {
                 $nearSphere: {
                     $geometry: {
@@ -60,18 +62,21 @@ const findNearbyVolunteers = async ({ latitude, longitude, maxDistance = NEARBY_
                     $maxDistance: maxDistance,
                 },
             },
-            mode: modeFilter,
         })
             .select(selectFields)
             .lean();
+
+        return volunteers.filter((volunteer) => isVolunteerModeEligibleForActiveAlerts(volunteer?.mode));
     } catch (error) {
         console.log("volunteer geo query fallback", error?.message || error);
 
-        const volunteers = await Volunteer.find({ mode: modeFilter })
+        const volunteers = await Volunteer.find({})
             .select(selectFields)
             .lean();
 
         return volunteers.filter((volunteer) => {
+            if (!isVolunteerModeEligibleForActiveAlerts(volunteer?.mode)) return false;
+
             const volunteerCoordinates = parseCoordinates(volunteer?.location?.coordinates);
             if (!volunteerCoordinates) return false;
 
@@ -273,7 +278,7 @@ export const getVolunteerNearbyAlertsController = async (req, res) => {
         }
 
         const { latitude, longitude } = parsedCoordinates;
-        const canReceiveFreshAlerts = AVAILABLE_VOLUNTEER_MODES.includes(volunteer?.mode);
+        const canReceiveFreshAlerts = isVolunteerModeEligibleForActiveAlerts(volunteer?.mode);
 
         // MongoDB does not allow $near inside $or, so fetch and merge separately.
         const activeNearbyAlerts = canReceiveFreshAlerts
