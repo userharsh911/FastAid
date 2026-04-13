@@ -1,4 +1,5 @@
 import express from "express"
+import http from "http"
 import mongoose from "mongoose"
 import dotenv from "dotenv"
 import volunteerAuthRouter from "../routes/auth.volunteer.routes.js";
@@ -6,9 +7,32 @@ import userAuthRouter from "../routes/auth.user.routes.js";
 import cors from "cors"
 import alertRouter from "../routes/alert.routes.js";
 import volunteerRouter from "../routes/volunteer.routes.js";
+import { expireStaleActiveAlerts } from "../libs/alertLifecycle.js";
+import { emitUserAlertRefresh, emitVolunteerAlertsRefresh, initSocketServer } from "../libs/socket.js";
 
 dotenv.config();
 const app = express();
+const ALERT_EXPIRY_JOB_INTERVAL_MS = 60 * 60 * 1000;
+
+const runAlertExpiryJob = async () => {
+    try {
+        const result = await expireStaleActiveAlerts();
+        if (result.expiredCount > 0) {
+            console.log(`[alert-expiry] Auto-cancelled ${result.expiredCount} stale alerts.`);
+
+            (result.userIds || []).forEach((userId) => {
+                emitUserAlertRefresh(userId, { reason: "expired" });
+            });
+
+            if ((result.volunteerIds || []).length > 0) {
+                emitVolunteerAlertsRefresh({ reason: "expired" });
+            }
+        }
+    } catch (error) {
+        console.log("error while running alert expiry job ", error);
+    }
+};
+
 app.use(cors({origin:'*'}))
 
 app.use(express.json({limit:'1mb'}))
@@ -23,9 +47,15 @@ app.use('/api',()=>{});
 
 mongoose.connect(process.env.DB_URI)
 .then(()=>{
-    app.listen(process.env.PORT,()=>{
+    const httpServer = http.createServer(app);
+    initSocketServer(httpServer);
+
+    httpServer.listen(process.env.PORT,()=>{
         console.log(`app is running on http://localhost:${process.env.PORT}`);
     });
+
+    runAlertExpiryJob();
+    setInterval(runAlertExpiryJob, ALERT_EXPIRY_JOB_INTERVAL_MS);
 
 })
 .catch((err)=>{

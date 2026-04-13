@@ -1,4 +1,6 @@
 import sendPushNotification from "../libs/sendNotification.js";
+import { expireStaleActiveAlerts, getAlertLifecycleMeta } from "../libs/alertLifecycle.js";
+import { emitUserAlertRefresh, emitVolunteerAlertsRefresh } from "../libs/socket.js";
 import Alert from "../model/alert.model.js";
 import Volunteer from "../model/volunteer.model.js";
 
@@ -23,6 +25,48 @@ const parseCoordinates = (coordinates) => {
     return { latitude, longitude };
 };
 
+const toIdString = (value) => {
+    if (!value) return null;
+    if (typeof value === "string") return value;
+    if (value?._id) return String(value._id);
+    if (typeof value.toString === "function") return value.toString();
+    return null;
+};
+
+const notifyAlertRealtime = (alertDoc, reason = "updated") => {
+    const alertId = toIdString(alertDoc?._id);
+    const userId = toIdString(alertDoc?.user_id);
+
+    if (userId) {
+        emitUserAlertRefresh(userId, { alertId, reason });
+    }
+
+    emitVolunteerAlertsRefresh({ alertId, reason });
+};
+
+const hydrateAlert = async (alertId) => {
+    return Alert.findById(alertId)
+        .populate("user_id", "fullname email phone")
+        .populate("volunteer_id", "_id email phone mode location")
+        .lean();
+};
+
+const releaseVolunteerAssignment = async (alertDoc) => {
+    const assignedVolunteerId = alertDoc?.volunteer_id?._id || alertDoc?.volunteer_id;
+
+    if (!assignedVolunteerId) {
+        return null;
+    }
+
+    return Volunteer.findByIdAndUpdate(
+        assignedVolunteerId,
+        { mode: "Available" },
+        { new: true }
+    )
+        .select("_id email phone mode location")
+        .lean();
+};
+
 export const createAlertController = async (req, res) => {
     try {
         const user = req.user;
@@ -35,6 +79,27 @@ export const createAlertController = async (req, res) => {
         const parsedCoordinates = parseCoordinates(coordinates);
         if (!parsedCoordinates) {
             return res.status(400).json({ success: false, message: "Invalid coordinates" });
+        }
+
+        await expireStaleActiveAlerts({ userId: user._id });
+
+        const existingOpenAlert = await Alert.findOne({
+            user_id: user._id,
+            mode: { $in: ["Active", "Alloted"] },
+        })
+            .sort({ createdAt: -1 })
+            .select("_id mode volunteer_id")
+            .lean();
+
+        if (existingOpenAlert) {
+            return res.status(409).json({
+                success: false,
+                message:
+                    existingOpenAlert.mode === "Alloted"
+                        ? "Volunteer is already assigned on your current alert. Cancel it first."
+                        : "You already have an active alert. Cancel it before sending another alert.",
+                alert: existingOpenAlert,
+            });
         }
 
         const { latitude, longitude } = parsedCoordinates;
@@ -72,6 +137,8 @@ export const createAlertController = async (req, res) => {
         });
 
         await emergencyAlert.save();
+
+        notifyAlertRealtime(emergencyAlert, "created");
 
         const tokens = volunteers.map((volunteer) => volunteer.push_token).filter(Boolean);
 
@@ -216,6 +283,8 @@ export const volunteerSelectAlertController = async (req, res) => {
 
         await Volunteer.findByIdAndUpdate(volunteer._id, { mode: "Alloted" });
 
+        notifyAlertRealtime(selectedAlert, "alloted");
+
         return res.status(200).json({ success: true, alert: selectedAlert });
     } catch (error) {
         console.log("error while volunteer selecting alert ", error);
@@ -230,6 +299,8 @@ export const getAlertStatusController = async (req, res) => {
         if (!alertId) {
             return res.status(400).json({ success: false, message: "Alert id is required" });
         }
+
+        await expireStaleActiveAlerts({ userId: req.user._id });
 
         const alert = await Alert.findOne({
             _id: alertId,
@@ -259,9 +330,167 @@ export const getAlertStatusController = async (req, res) => {
             alert,
             nearbyVolunteers,
             canHire: alert.mode === "Alloted" && Boolean(alert.volunteer_id),
+            lifecycle: getAlertLifecycleMeta(alert),
         });
     } catch (error) {
         console.log("error while getting alert status ", error);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
+export const getUserAlertHistoryController = async (req, res) => {
+    try {
+        await expireStaleActiveAlerts({ userId: req.user._id });
+
+        const alerts = await Alert.find({ user_id: req.user._id })
+            .populate("volunteer_id", "_id email phone mode location")
+            .sort({ createdAt: -1 })
+            .lean();
+
+        const alertsWithLifecycle = alerts.map((alert) => ({
+            ...alert,
+            lifecycle: getAlertLifecycleMeta(alert),
+        }));
+
+        return res.status(200).json({
+            success: true,
+            alerts: alertsWithLifecycle,
+            totalAlerts: alertsWithLifecycle.length,
+        });
+    } catch (error) {
+        console.log("error while getting user alert history ", error);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
+export const cancelAlertController = async (req, res) => {
+    try {
+        const user = req.user;
+        const volunteer = req.volunteer;
+        const { alertId, id } = req.body;
+        const targetAlertId = alertId || id;
+
+        if (!targetAlertId) {
+            return res.status(400).json({ success: false, message: "Alert id is required" });
+        }
+
+        const alert = await Alert.findById(targetAlertId);
+
+        if (!alert) {
+            return res.status(404).json({ success: false, message: "Alert not found" });
+        }
+
+        const alertOwnerId = alert.user_id?.toString();
+        const assignedVolunteerId = alert.volunteer_id?.toString();
+
+        const isAlertOwner = Boolean(user) && String(user._id) === String(alertOwnerId);
+        const isAssignedVolunteer =
+            Boolean(volunteer) &&
+            Boolean(assignedVolunteerId) &&
+            String(volunteer._id) === String(assignedVolunteerId);
+
+        if (!isAlertOwner && !isAssignedVolunteer) {
+            return res.status(403).json({ success: false, message: "Not allowed to cancel this alert" });
+        }
+
+        if (alert.mode === "End") {
+            return res.status(409).json({ success: false, message: "Completed alert cannot be cancelled" });
+        }
+
+        if (alert.mode === "Cancelled") {
+            const existingAlert = await hydrateAlert(alert._id);
+            return res.status(200).json({
+                success: true,
+                message: "Alert is already cancelled",
+                alert: existingAlert,
+            });
+        }
+
+        alert.mode = "Cancelled";
+        await alert.save();
+
+        const releasedVolunteer = await releaseVolunteerAssignment(alert);
+        const updatedAlert = await hydrateAlert(alert._id);
+
+        notifyAlertRealtime(updatedAlert, "cancelled");
+
+        return res.status(200).json({
+            success: true,
+            message: "Alert cancelled successfully",
+            alert: updatedAlert,
+            releasedVolunteer,
+        });
+    } catch (error) {
+        console.log("error while cancelling alert ", error);
+
+        if (error?.name === "CastError") {
+            return res.status(400).json({ success: false, message: "Invalid alert id" });
+        }
+
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
+export const endAlertController = async (req, res) => {
+    try {
+        const { alertId, id } = req.body;
+        const targetAlertId = alertId || id;
+
+        if (!targetAlertId) {
+            return res.status(400).json({ success: false, message: "Alert id is required" });
+        }
+
+        const alert = await Alert.findOne({
+            _id: targetAlertId,
+            user_id: req.user._id,
+        });
+
+        if (!alert) {
+            return res.status(404).json({ success: false, message: "Alert not found" });
+        }
+
+        if (alert.mode === "End") {
+            const existingAlert = await hydrateAlert(alert._id);
+            return res.status(200).json({
+                success: true,
+                message: "Alert is already completed",
+                alert: existingAlert,
+            });
+        }
+
+        if (alert.mode === "Cancelled") {
+            return res.status(409).json({ success: false, message: "Cancelled alert cannot be ended" });
+        }
+
+        if (alert.mode !== "Alloted" || !alert.volunteer_id) {
+            return res.status(409).json({
+                success: false,
+                message: "You can end alert only after volunteer is allotted",
+            });
+        }
+
+        alert.mode = "End";
+        await alert.save();
+
+        const releasedVolunteer = await releaseVolunteerAssignment(alert);
+        const updatedAlert = await hydrateAlert(alert._id);
+
+        notifyAlertRealtime(updatedAlert, "ended");
+
+        return res.status(200).json({
+            success: true,
+            message: "Alert ended successfully",
+            alert: updatedAlert,
+            releasedVolunteer,
+        });
+
+    } catch (error) {
+        console.log("error while ending alert ", error);
+
+        if (error?.name === "CastError") {
+            return res.status(400).json({ success: false, message: "Invalid alert id" });
+        }
+
         return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
