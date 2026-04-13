@@ -4,6 +4,8 @@ import { emitUserAlertRefresh, emitVolunteerAlertsRefresh } from "../libs/socket
 import Alert from "../model/alert.model.js";
 import Volunteer from "../model/volunteer.model.js";
 
+const NEARBY_DISTANCE_METERS = 500;
+
 const parseCoordinates = (coordinates) => {
     let latitude;
     let longitude;
@@ -41,6 +43,84 @@ const calculateDistanceMeters = ({ from, to }) => {
 
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return earthRadius * c;
+};
+
+const findNearbyVolunteers = async ({ latitude, longitude, maxDistance = NEARBY_DISTANCE_METERS, selectFields }) => {
+    const modeFilter = { $nin: ["Busy", "Alloted"] };
+
+    try {
+        return Volunteer.find({
+            location: {
+                $nearSphere: {
+                    $geometry: {
+                        type: "Point",
+                        coordinates: [longitude, latitude],
+                    },
+                    $maxDistance: maxDistance,
+                },
+            },
+            mode: modeFilter,
+        })
+            .select(selectFields)
+            .lean();
+    } catch (error) {
+        console.log("volunteer geo query fallback", error?.message || error);
+
+        const volunteers = await Volunteer.find({ mode: modeFilter })
+            .select(selectFields)
+            .lean();
+
+        return volunteers.filter((volunteer) => {
+            const volunteerCoordinates = parseCoordinates(volunteer?.location?.coordinates);
+            if (!volunteerCoordinates) return false;
+
+            const distanceMeters = calculateDistanceMeters({
+                from: { latitude, longitude },
+                to: volunteerCoordinates,
+            });
+
+            return distanceMeters <= maxDistance;
+        });
+    }
+};
+
+const findActiveNearbyAlerts = async ({ latitude, longitude, maxDistance = NEARBY_DISTANCE_METERS }) => {
+    try {
+        return Alert.find({
+            mode: "Active",
+            location: {
+                $nearSphere: {
+                    $geometry: {
+                        type: "Point",
+                        coordinates: [longitude, latitude],
+                    },
+                    $maxDistance: maxDistance,
+                },
+            },
+        })
+            .populate("user_id", "fullname email phone")
+            .populate("volunteer_id", "email phone location mode")
+            .lean();
+    } catch (error) {
+        console.log("alert geo query fallback", error?.message || error);
+
+        const activeAlerts = await Alert.find({ mode: "Active" })
+            .populate("user_id", "fullname email phone")
+            .populate("volunteer_id", "email phone location mode")
+            .lean();
+
+        return activeAlerts.filter((alert) => {
+            const alertCoordinates = parseCoordinates(alert?.location?.coordinates);
+            if (!alertCoordinates) return false;
+
+            const distanceMeters = calculateDistanceMeters({
+                from: { latitude, longitude },
+                to: alertCoordinates,
+            });
+
+            return distanceMeters <= maxDistance;
+        });
+    }
 };
 
 const toIdString = (value) => {
@@ -122,18 +202,14 @@ export const createAlertController = async (req, res) => {
 
         const { latitude, longitude } = parsedCoordinates;
 
-        const volunteers = await Volunteer.find({
-            location: {
-                $nearSphere: {
-                    $geometry: {
-                        type: "Point",
-                        coordinates: [longitude, latitude]
-                    },
-                    $maxDistance: 500 // meters
-                }
-            },
-            mode: { $nin: ["Busy", "Alloted"] }
-        }).select("_id email phone location mode push_token")
+        const volunteers = await findNearbyVolunteers({
+            latitude,
+            longitude,
+            maxDistance: NEARBY_DISTANCE_METERS,
+            selectFields: "_id email phone location mode push_token",
+        });
+
+        console.log("nearby volunteers ",volunteers);
 
         const nearbyVolunteers = volunteers.map((volunteer) => ({
             _id: volunteer._id,
@@ -142,6 +218,8 @@ export const createAlertController = async (req, res) => {
             mode: volunteer.mode,
             location: volunteer.location
         }));
+
+        console.log("mapped nearby volunteers ",nearbyVolunteers);
 
         const emergencyAlert = new Alert({
             user_id: user._id,
@@ -200,21 +278,11 @@ export const getVolunteerNearbyAlertsController = async (req, res) => {
         const { latitude, longitude } = parsedCoordinates;
 
         // MongoDB does not allow $near inside $or, so fetch and merge separately.
-        const activeNearbyAlerts = await Alert.find({
-            mode: "Active",
-            location: {
-                $nearSphere: {
-                    $geometry: {
-                        type: "Point",
-                        coordinates: [longitude, latitude],
-                    },
-                    $maxDistance: 500,
-                },
-            },
-        })
-            .populate("user_id", "fullname email phone")
-            .populate("volunteer_id", "email phone location mode")
-            .lean();
+        const activeNearbyAlerts = await findActiveNearbyAlerts({
+            latitude,
+            longitude,
+            maxDistance: NEARBY_DISTANCE_METERS,
+        });
 
         const allotedForVolunteer = await Alert.find({
             mode: "Alloted",
@@ -288,7 +356,7 @@ export const volunteerSelectAlertController = async (req, res) => {
             to: parsedAlertCoordinates,
         });
 
-        if (distanceMeters > 500) {
+        if (distanceMeters > NEARBY_DISTANCE_METERS) {
             return res.status(403).json({
                 success: false,
                 message: "You can select alerts only within 500 meters",
@@ -358,20 +426,12 @@ export const getAlertStatusController = async (req, res) => {
 
         const { latitude, longitude } = parsedAlertCoordinates;
 
-        const dynamicNearbyVolunteers = await Volunteer.find({
-            location: {
-                $nearSphere: {
-                    $geometry: {
-                        type: "Point",
-                        coordinates: [longitude, latitude],
-                    },
-                    $maxDistance: 500,
-                },
-            },
-            mode: { $nin: ["Busy", "Alloted"] },
-        })
-            .select("_id email phone location mode")
-            .lean();
+        const dynamicNearbyVolunteers = await findNearbyVolunteers({
+            latitude,
+            longitude,
+            maxDistance: NEARBY_DISTANCE_METERS,
+            selectFields: "_id email phone location mode",
+        });
 
         const nearbyVolunteersMap = new Map();
 
