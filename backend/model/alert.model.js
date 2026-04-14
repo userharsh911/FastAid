@@ -25,8 +25,20 @@ const alertSchema = new mongoose.Schema({
         publicId:{
             type:String,
         },
+        url:{
+            type:String,
+        },
         imageId:{
             type:String
+        },
+        width:{
+            type:Number,
+        },
+        height:{
+            type:Number,
+        },
+        format:{
+            type:String,
         }
     },
     volunteer_id:{

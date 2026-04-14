@@ -3,6 +3,7 @@ import { expireStaleActiveAlerts, getAlertLifecycleMeta } from "../libs/alertLif
 import { emitUserAlertRefresh, emitVolunteerAlertsRefresh } from "../libs/socket.js";
 import Alert from "../model/alert.model.js";
 import Volunteer from "../model/volunteer.model.js";
+import { uploadAlertImageToCloudinary } from "../libs/cloudinary.js";
 
 const NEARBY_DISTANCE_METERS = 500;
 
@@ -12,14 +13,24 @@ const isVolunteerModeEligibleForActiveAlerts = (mode) => {
 };
 
 const parseCoordinates = (coordinates) => {
+    let normalizedCoordinates = coordinates;
+
+    if (typeof normalizedCoordinates === "string") {
+        try {
+            normalizedCoordinates = JSON.parse(normalizedCoordinates);
+        } catch (error) {
+            return null;
+        }
+    }
+
     let latitude;
     let longitude;
 
-    if (Array.isArray(coordinates)) {
-        [longitude, latitude] = coordinates;
+    if (Array.isArray(normalizedCoordinates)) {
+        [longitude, latitude] = normalizedCoordinates;
     } else {
-        latitude = coordinates?.latitude ?? coordinates?.lat;
-        longitude = coordinates?.longitude ?? coordinates?.lng;
+        latitude = normalizedCoordinates?.latitude ?? normalizedCoordinates?.lat;
+        longitude = normalizedCoordinates?.longitude ?? normalizedCoordinates?.lng;
     }
 
     latitude = Number(latitude);
@@ -265,6 +276,8 @@ export const createAlertController = async (req, res) => {
     try {
         const user = req.user;
         const { coordinates, description } = req.body;
+        const alertImageFile = req.file;
+        const normalizedDescription = typeof description === "string" ? description.trim() : "";
 
         if (!coordinates) {
             return res.status(400).json({ success: false, message: "Coordinates are required" });
@@ -298,6 +311,23 @@ export const createAlertController = async (req, res) => {
 
         const { latitude, longitude } = parsedCoordinates;
 
+        let uploadedImage = null;
+        if (alertImageFile?.buffer?.length) {
+            try {
+                uploadedImage = await uploadAlertImageToCloudinary({
+                    fileBuffer: alertImageFile.buffer,
+                    mimetype: alertImageFile.mimetype,
+                    userId: user?._id,
+                });
+            } catch (uploadError) {
+                console.log("error while uploading alert image ", uploadError);
+                return res.status(500).json({
+                    success: false,
+                    message: "Unable to upload alert image right now",
+                });
+            }
+        }
+
         const volunteers = await findNearbyVolunteers({
             latitude,
             longitude,
@@ -315,11 +345,21 @@ export const createAlertController = async (req, res) => {
 
         const emergencyAlert = new Alert({
             user_id: user._id,
-            description: description ? description : null,
+            description: normalizedDescription || null,
             location: {
                 type: "Point",
                 coordinates: [longitude, latitude]
             },
+            image: uploadedImage
+                ? {
+                    publicId: uploadedImage.publicId,
+                    imageId: uploadedImage.publicId,
+                    url: uploadedImage.url,
+                    width: uploadedImage.width,
+                    height: uploadedImage.height,
+                    format: uploadedImage.format,
+                }
+                : undefined,
             mode: "Active",
             volunteers: []
         });
@@ -341,7 +381,7 @@ export const createAlertController = async (req, res) => {
             {
                 screen: "/(app)/(tabs)/(home)",
                 alertId: emergencyAlert._id.toString(),
-                description: description || "Emergency nearby",
+                description: normalizedDescription || "Emergency nearby",
                 latitude,
                 longitude,
             }

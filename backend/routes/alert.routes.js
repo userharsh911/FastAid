@@ -10,6 +10,7 @@ import {
 	hireVolunteerController,
 	volunteerSelectAlertController,
 } from "../controller/alert.controller.js";
+import { alertImageUploadMiddleware } from "../middleware/alertImageUpload.js";
 import { userProtectedRoute, volunteerProtectedRoute } from "../middleware/protectedRoute.js";
 
 const alertRouter = express.Router();
@@ -34,7 +35,7 @@ alertRouter.post('/end', userProtectedRoute, endAlertController);
 alertRouter.post('/hire/:token', userProtectedRoute, hireVolunteerController);
 alertRouter.post('/hire', userProtectedRoute, hireVolunteerController);
 
-alertRouter.post('/create/:token', userProtectedRoute, createAlertController);
-alertRouter.post('/create', userProtectedRoute, createAlertController);
+alertRouter.post('/create/:token', alertImageUploadMiddleware, userProtectedRoute, createAlertController);
+alertRouter.post('/create', alertImageUploadMiddleware, userProtectedRoute, createAlertController);
 
 export default alertRouter
