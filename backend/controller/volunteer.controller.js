@@ -54,7 +54,7 @@ export const volunteerUpdateLocationController = async(req,res)=>{
 
         
         const volunteer = await Volunteer.findById(userId)
-        .select("_id fullname email phone location mode")
+        .select("_id fullname email phone location mode isverified verification_document")
         .lean();
         
         if (!volunteer) {
@@ -91,7 +91,7 @@ export const volunteerUpdateProfileController = async(req,res)=>{
             userId,
             { $set: updates },
             { returnDocument: "after" }
-        ).select("_id fullname email phone location mode");
+        ).select("_id fullname email phone location mode isverified verification_document");
 
         if (!volunteer) {
             return res.status(404).json({success:false,message:"Volunteer not found"});

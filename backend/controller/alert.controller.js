@@ -12,6 +12,13 @@ const isVolunteerModeEligibleForActiveAlerts = (mode) => {
     return normalizedMode !== "busy" && normalizedMode !== "alloted";
 };
 
+const isVolunteerVerified = (volunteer) => Boolean(volunteer?.isverified);
+
+const isVolunteerEligibleForActiveAlerts = (volunteer) => (
+    isVolunteerVerified(volunteer) &&
+    isVolunteerModeEligibleForActiveAlerts(volunteer?.mode)
+);
+
 const parseCoordinates = (coordinates) => {
     let normalizedCoordinates = coordinates;
 
@@ -64,6 +71,7 @@ const calculateDistanceMeters = ({ from, to }) => {
 const findNearbyVolunteers = async ({ latitude, longitude, maxDistance = NEARBY_DISTANCE_METERS, selectFields }) => {
     try {
         const volunteers = await Volunteer.find({
+            isverified: true,
             location: {
                 $nearSphere: {
                     $geometry: {
@@ -77,16 +85,16 @@ const findNearbyVolunteers = async ({ latitude, longitude, maxDistance = NEARBY_
             .select(selectFields)
             .lean();
 
-        return volunteers.filter((volunteer) => isVolunteerModeEligibleForActiveAlerts(volunteer?.mode));
+        return volunteers.filter((volunteer) => isVolunteerEligibleForActiveAlerts(volunteer));
     } catch (error) {
         console.log("volunteer geo query fallback", error?.message || error);
 
-        const volunteers = await Volunteer.find({})
+        const volunteers = await Volunteer.find({ isverified: true })
             .select(selectFields)
             .lean();
 
         return volunteers.filter((volunteer) => {
-            if (!isVolunteerModeEligibleForActiveAlerts(volunteer?.mode)) return false;
+            if (!isVolunteerEligibleForActiveAlerts(volunteer)) return false;
 
             const volunteerCoordinates = parseCoordinates(volunteer?.location?.coordinates);
             if (!volunteerCoordinates) return false;
@@ -151,6 +159,7 @@ const toIdString = (value) => {
 const findVolunteerIdsNearCoordinates = async ({ latitude, longitude, maxDistance = NEARBY_DISTANCE_METERS }) => {
     try {
         const nearbyVolunteers = await Volunteer.find({
+            isverified: true,
             location: {
                 $nearSphere: {
                     $geometry: {
@@ -161,21 +170,24 @@ const findVolunteerIdsNearCoordinates = async ({ latitude, longitude, maxDistanc
                 },
             },
         })
-            .select("_id")
+            .select("_id mode isverified")
             .lean();
 
         return nearbyVolunteers
+            .filter((volunteer) => isVolunteerEligibleForActiveAlerts(volunteer))
             .map((volunteer) => toIdString(volunteer?._id))
             .filter(Boolean);
     } catch (error) {
         console.log("volunteer notify geo fallback", error?.message || error);
 
-        const volunteers = await Volunteer.find({})
-            .select("_id location")
+        const volunteers = await Volunteer.find({ isverified: true })
+            .select("_id location mode isverified")
             .lean();
 
         return volunteers
             .filter((volunteer) => {
+                if (!isVolunteerEligibleForActiveAlerts(volunteer)) return false;
+
                 const volunteerCoordinates = parseCoordinates(volunteer?.location?.coordinates);
                 if (!volunteerCoordinates) return false;
 
@@ -221,7 +233,21 @@ const resolveRelevantVolunteerIdsForAlert = async (alertDoc) => {
         });
     }
 
-    return Array.from(volunteerIds);
+    const rawVolunteerIds = Array.from(volunteerIds);
+    if (!rawVolunteerIds.length) {
+        return [];
+    }
+
+    const verifiedVolunteers = await Volunteer.find({
+        _id: { $in: rawVolunteerIds },
+        isverified: true,
+    })
+        .select("_id")
+        .lean();
+
+    return verifiedVolunteers
+        .map((volunteer) => toIdString(volunteer?._id))
+        .filter(Boolean);
 };
 
 const notifyAlertRealtime = async (alertDoc, reason = "updated", volunteerIds = []) => {
@@ -332,7 +358,7 @@ export const createAlertController = async (req, res) => {
             latitude,
             longitude,
             maxDistance: NEARBY_DISTANCE_METERS,
-            selectFields: "_id email phone location mode push_token",
+            selectFields: "_id email phone location mode push_token isverified",
         });
 
         const nearbyVolunteers = volunteers.map((volunteer) => ({
@@ -405,6 +431,15 @@ export const createAlertController = async (req, res) => {
 export const getVolunteerNearbyAlertsController = async (req, res) => {
     try {
         const volunteer = req.volunteer;
+
+        if (!volunteer?.isverified) {
+            return res.status(200).json({
+                success: true,
+                alerts: [],
+                message: "Volunteer account is pending verification",
+            });
+        }
+
         const parsedCoordinates = parseCoordinates(volunteer?.location?.coordinates);
 
         if (!parsedCoordinates) {
@@ -451,6 +486,13 @@ export const volunteerSelectAlertController = async (req, res) => {
     try {
         const volunteer = req.volunteer;
         const { alertId } = req.body;
+
+        if (!volunteer?.isverified) {
+            return res.status(403).json({
+                success: false,
+                message: "Your account is not verified yet",
+            });
+        }
 
         if (!alertId) {
             return res.status(400).json({ success: false, message: "Alert id is required" });
@@ -564,11 +606,18 @@ export const hireVolunteerController = async (req, res) => {
         }
 
         const volunteer = await Volunteer.findById(volunteerId)
-            .select("_id email phone mode location")
+            .select("_id email phone mode location isverified")
             .lean();
 
         if (!volunteer) {
             return res.status(404).json({ success: false, message: "Volunteer not found" });
+        }
+
+        if (!volunteer?.isverified) {
+            return res.status(409).json({
+                success: false,
+                message: "Volunteer account is not verified",
+            });
         }
 
         const volunteerBusyWithOtherAlert = await Alert.findOne({
@@ -675,12 +724,12 @@ export const getAlertStatusController = async (req, res) => {
             latitude,
             longitude,
             maxDistance: NEARBY_DISTANCE_METERS,
-            selectFields: "_id email phone location mode",
+            selectFields: "_id email phone location mode isverified",
         });
         const respondedVolunteerIds = Array.isArray(alert?.volunteers) ? alert.volunteers : [];
         const respondedVolunteers = respondedVolunteerIds.length
-            ? await Volunteer.find({ _id: { $in: respondedVolunteerIds } })
-                .select("_id email phone location mode")
+            ? await Volunteer.find({ _id: { $in: respondedVolunteerIds }, isverified: true })
+                .select("_id email phone location mode isverified")
                 .lean()
             : [];
 

@@ -37,6 +37,34 @@ const volunteerSchema = new mongoose.Schema({
             required:true
         }
     },
+    verification_document: {
+        publicId: {
+            type: String,
+        },
+        url: {
+            type: String,
+        },
+        format: {
+            type: String,
+        },
+        resourceType: {
+            type: String,
+        },
+        bytes: {
+            type: Number,
+        },
+        originalName: {
+            type: String,
+        },
+        mimeType: {
+            type: String,
+        },
+    },
+    isverified: {
+        type: Boolean,
+        default: false,
+        required: true,
+    },
     push_token: {
         type: String,
         default: null

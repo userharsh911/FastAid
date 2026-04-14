@@ -1,19 +1,30 @@
 import { createJSONwebToken } from "../libs/jwt.js";
+import { uploadVolunteerDocumentToCloudinary } from "../libs/cloudinary.js";
 import Volunteer from "../model/volunteer.model.js";
 import bcryptjs from "bcryptjs"
 
 export const applyVolunteerController = async(req,res)=>{
     try {
         const {fullname,email,password,phone,coordinates} = req.body;
+        const verificationDocumentFile = req.file;
+
+        let normalizedCoordinates = coordinates;
+        if (typeof normalizedCoordinates === "string") {
+            try {
+                normalizedCoordinates = JSON.parse(normalizedCoordinates);
+            } catch (_error) {
+                normalizedCoordinates = null;
+            }
+        }
 
         let latitude;
         let longitude;
 
-        if (Array.isArray(coordinates)) {
-            [longitude, latitude] = coordinates;
+        if (Array.isArray(normalizedCoordinates)) {
+            [longitude, latitude] = normalizedCoordinates;
         } else {
-            latitude = coordinates?.latitude ?? coordinates?.lat;
-            longitude = coordinates?.longitude ?? coordinates?.lng;
+            latitude = normalizedCoordinates?.latitude ?? normalizedCoordinates?.lat;
+            longitude = normalizedCoordinates?.longitude ?? normalizedCoordinates?.lng;
         }
 
         latitude = Number(latitude);
@@ -23,8 +34,30 @@ export const applyVolunteerController = async(req,res)=>{
             return res.status(400).json({success:false,message:"All fields are required"});
         }
 
+        if (!verificationDocumentFile?.buffer?.length) {
+            return res.status(400).json({
+                success: false,
+                message: "Verification document is required",
+            });
+        }
+
         const volunteerExist = await Volunteer.findOne({email});
         if(volunteerExist) return res.status(409).json({success:false,message:"Email already exist"});
+
+        let uploadedDocument = null;
+        try {
+            uploadedDocument = await uploadVolunteerDocumentToCloudinary({
+                fileBuffer: verificationDocumentFile.buffer,
+                mimetype: verificationDocumentFile.mimetype,
+                originalName: verificationDocumentFile.originalname,
+            });
+        } catch (uploadError) {
+            console.log("error while uploading volunteer document : ", uploadError);
+            return res.status(500).json({
+                success: false,
+                message: "Unable to upload volunteer document",
+            });
+        }
 
         const salt = await bcryptjs.genSalt(10);
         const hashedPassword = await bcryptjs.hash(password,salt);
@@ -39,14 +72,27 @@ export const applyVolunteerController = async(req,res)=>{
             location:{
                 type:"Point",
                 coordinates:[longitude, latitude]
-            }
+            },
+            verification_document: {
+                publicId: uploadedDocument.publicId,
+                url: uploadedDocument.url,
+                format: uploadedDocument.format,
+                resourceType: uploadedDocument.resourceType,
+                bytes: uploadedDocument.bytes,
+                originalName: verificationDocumentFile.originalname,
+                mimeType: verificationDocumentFile.mimetype,
+            },
+            isverified: false,
         })
 
         await volunteer.save();
 
         const token = createJSONwebToken(email);
 
-        res.status(201).send({success:true,token,volunteer});
+        const volunteerResponse = volunteer.toObject();
+        delete volunteerResponse.password;
+
+        res.status(201).send({success:true,token,volunteer: volunteerResponse});
 
     } catch (error) {
         console.log("error while applying as volunteer : ",error);

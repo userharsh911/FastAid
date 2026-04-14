@@ -68,4 +68,52 @@ export const uploadAlertImageToCloudinary = async ({ fileBuffer, mimetype, userI
     });
 };
 
+export const uploadVolunteerDocumentToCloudinary = async ({
+    fileBuffer,
+    mimetype,
+    volunteerId,
+    originalName,
+}) => {
+    if (!fileBuffer?.length) {
+        throw new Error("Volunteer document buffer is missing");
+    }
+
+    const credentials = getCloudinaryCredentials();
+    configureCloudinary(credentials);
+
+    if (!isCloudinaryConfigured(credentials)) {
+        throw new Error("Cloudinary credentials are missing");
+    }
+
+    const folderVolunteerPart = volunteerId ? `volunteer_${volunteerId}` : "new";
+
+    return new Promise((resolve, reject) => {
+        const uploadStream = cloudinary.uploader.upload_stream(
+            {
+                folder: `emergent-guardian/volunteer-documents/${folderVolunteerPart}`,
+                resource_type: "auto",
+                use_filename: true,
+                unique_filename: true,
+                filename_override: originalName || undefined,
+            },
+            (error, result) => {
+                if (error || !result) {
+                    reject(error || new Error("Cloudinary document upload failed"));
+                    return;
+                }
+
+                resolve({
+                    publicId: result.public_id,
+                    url: result.secure_url,
+                    format: result.format,
+                    bytes: result.bytes,
+                    resourceType: result.resource_type,
+                });
+            }
+        );
+
+        uploadStream.end(fileBuffer);
+    });
+};
+
 export default cloudinary;
