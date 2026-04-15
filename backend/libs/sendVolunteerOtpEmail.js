@@ -13,8 +13,8 @@ const buildVolunteerOtpHtml = ({ otpCode, expiryMinutes }) => {
 };
 
 export const sendVolunteerOtpEmail = async ({ email, otpCode, expiryMinutes }) => {
-    const resendApiKey = process.env.RESEND_API_KEY;
-    const resendFromEmail = process.env.RESEND_FROM_EMAIL;
+    const resendApiKey = String(process.env.RESEND_API_KEY || "").trim();
+    const resendFromEmail = String(process.env.RESEND_FROM_EMAIL || "").trim();
 
     if (!resendApiKey || !resendFromEmail) {
         throw new Error("OTP email service is not configured");
@@ -22,11 +22,16 @@ export const sendVolunteerOtpEmail = async ({ email, otpCode, expiryMinutes }) =
 
     const resendClient = new Resend(resendApiKey);
 
-    await resendClient.emails.send({
+    const { error } = await resendClient.emails.send({
         from: resendFromEmail,
         to: email,
         subject: "Your Volunteer OTP - Emergent Guardian",
         html: buildVolunteerOtpHtml({ otpCode, expiryMinutes }),
         text: `Your volunteer verification OTP is ${otpCode}. It expires in ${expiryMinutes} minutes.`,
     });
+
+    if (error) {
+        const resendErrorMessage = typeof error?.message === "string" ? error.message : "Failed to send OTP email";
+        throw new Error(resendErrorMessage);
+    }
 };

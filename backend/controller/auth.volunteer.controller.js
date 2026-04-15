@@ -98,11 +98,20 @@ const issueVolunteerOtp = async (volunteer) => {
 
     await volunteer.save();
 
-    await sendVolunteerOtpEmail({
-        email: volunteer.email,
-        otpCode,
-        expiryMinutes: otpExpiryMinutes,
-    });
+    try {
+        await sendVolunteerOtpEmail({
+            email: volunteer.email,
+            otpCode,
+            expiryMinutes: otpExpiryMinutes,
+        });
+    } catch (error) {
+        volunteer.email_otp = null;
+        volunteer.email_otp_expires_at = null;
+        volunteer.email_otp_daily_count = Math.max(0, Number(volunteer?.email_otp_daily_count || 1) - 1);
+        await volunteer.save();
+
+        throw error;
+    }
 
     return {
         success: true,
@@ -152,11 +161,14 @@ export const applyVolunteerController = async(req,res)=>{
                 return res.status(409).json({success:false,message:"Email already exist"});
             }
 
-            const otpMeta = await issueVolunteerOtp(volunteerExist).catch(() => null);
-            if (!otpMeta) {
+            let otpMeta = null;
+            try {
+                otpMeta = await issueVolunteerOtp(volunteerExist);
+            } catch (error) {
+                console.error("Volunteer OTP send failed (existing unverified account):", error?.message || error);
                 return res.status(500).json({
                     success: false,
-                    message: "Unable to send OTP right now. Please try again.",
+                    message: "Unable to send OTP email right now. Please check email service setup.",
                 });
             }
 
@@ -248,11 +260,14 @@ export const applyVolunteerController = async(req,res)=>{
             email_otp_verified: false,
         })
 
-        const otpMeta = await issueVolunteerOtp(volunteer).catch(() => null);
-        if (!otpMeta) {
+        let otpMeta = null;
+        try {
+            otpMeta = await issueVolunteerOtp(volunteer);
+        } catch (error) {
+            console.error("Volunteer OTP send failed (new account):", error?.message || error);
             return res.status(500).json({
                 success: false,
-                message: "Volunteer account created but OTP could not be sent. Try login to resend OTP.",
+                message: "Volunteer account created but OTP email failed. Please use login to resend OTP.",
             });
         }
 
@@ -287,11 +302,14 @@ export const loginVolunteerController = async(req,res)=>{
         if(!isVerify) return res.status(400).json({success:false,message:"Credentials are invalid"});
 
         if (!isVolunteerEmailOtpVerified(volunteer)) {
-            const otpMeta = await issueVolunteerOtp(volunteer).catch(() => null);
-            if (!otpMeta) {
+            let otpMeta = null;
+            try {
+                otpMeta = await issueVolunteerOtp(volunteer);
+            } catch (error) {
+                console.error("Volunteer OTP send failed (login unverified):", error?.message || error);
                 return res.status(500).json({
                     success: false,
-                    message: "Unable to send OTP right now. Please try again.",
+                    message: "Unable to send OTP email right now. Please check email service setup.",
                 });
             }
 
@@ -400,11 +418,14 @@ export const resendVolunteerOtpController = async(req,res)=>{
             });
         }
 
-        const otpMeta = await issueVolunteerOtp(volunteer).catch(() => null);
-        if (!otpMeta) {
+        let otpMeta = null;
+        try {
+            otpMeta = await issueVolunteerOtp(volunteer);
+        } catch (error) {
+            console.error("Volunteer OTP resend failed:", error?.message || error);
             return res.status(500).json({
                 success: false,
-                message: "Unable to send OTP right now. Please try again.",
+                message: "Unable to send OTP email right now. Please check email service setup.",
             });
         }
 
