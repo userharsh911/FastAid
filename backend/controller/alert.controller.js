@@ -402,7 +402,7 @@ export const createAlertController = async (req, res) => {
             "Nearby emergency detected",
             `Emergency available nearby, by ${user?.fullname || "a user"}`,
             {
-                screen: "/(app)/(tabs)/(home)",
+                screen: "/(app)/(tabs)/(home)/index",
                 alertId: emergencyAlert._id.toString(),
                 description: normalizedDescription || "Emergency nearby",
                 latitude,
