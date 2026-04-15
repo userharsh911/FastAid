@@ -1,13 +1,15 @@
-﻿import { createJSONwebToken } from "../libs/jwt.js";
+﻿import { createJSONwebToken, createVolunteerPasswordResetToken, verifyVolunteerPasswordResetToken } from "../libs/jwt.js";
 import { uploadVolunteerDocumentToCloudinary } from "../libs/cloudinary.js";
-import { sendVolunteerOtpEmail } from "../libs/sendVolunteerOtpEmail.js";
+import { OTP_EMAIL_PURPOSE, sendVolunteerOtpEmail } from "../libs/sendVolunteerOtpEmail.js";
 import Volunteer from "../model/volunteer.model.js";
 import bcryptjs from "bcryptjs"
 import crypto from "crypto";
 
 const OTP_MAX_SEND_PER_DAY = 3;
+const PASSWORD_RESET_OTP_MAX_SEND_PER_DAY = 3;
 const OTP_WINDOW_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_OTP_EXPIRY_MINUTES = 10;
+const PASSWORD_RESET_SESSION_WINDOW_MS = 15 * 60 * 1000;
 
 const normalizeEmail = (email) => String(email || "").trim().toLowerCase();
 
@@ -40,6 +42,15 @@ const toVolunteerResponse = (volunteer) => {
 
     delete volunteerResponse.password;
     delete volunteerResponse.email_otp;
+    delete volunteerResponse.email_otp_expires_at;
+    delete volunteerResponse.email_otp_daily_count;
+    delete volunteerResponse.email_otp_daily_reset_at;
+    delete volunteerResponse.password_reset_otp;
+    delete volunteerResponse.password_reset_otp_expires_at;
+    delete volunteerResponse.password_reset_otp_verified;
+    delete volunteerResponse.password_reset_otp_verified_at;
+    delete volunteerResponse.password_reset_otp_daily_count;
+    delete volunteerResponse.password_reset_otp_daily_reset_at;
 
     return volunteerResponse;
 };
@@ -73,6 +84,38 @@ const getOtpLimitMeta = (volunteer) => {
         limited: true,
         remaining: 0,
         retryAt: volunteer?.email_otp_daily_reset_at,
+    };
+};
+
+const ensurePasswordResetOtpWindow = (volunteer) => {
+    const nowMs = Date.now();
+    const resetAtMs = volunteer?.password_reset_otp_daily_reset_at
+        ? new Date(volunteer.password_reset_otp_daily_reset_at).getTime()
+        : 0;
+
+    if (!Number.isFinite(resetAtMs) || nowMs >= resetAtMs) {
+        volunteer.password_reset_otp_daily_count = 0;
+        volunteer.password_reset_otp_daily_reset_at = new Date(nowMs + OTP_WINDOW_MS);
+    }
+};
+
+const getPasswordResetOtpLimitMeta = (volunteer) => {
+    ensurePasswordResetOtpWindow(volunteer);
+
+    const currentCount = Number(volunteer?.password_reset_otp_daily_count || 0);
+    const remaining = Math.max(0, PASSWORD_RESET_OTP_MAX_SEND_PER_DAY - currentCount);
+
+    if (remaining > 0) {
+        return {
+            limited: false,
+            remaining,
+        };
+    }
+
+    return {
+        limited: true,
+        remaining: 0,
+        retryAt: volunteer?.password_reset_otp_daily_reset_at,
     };
 };
 
@@ -118,6 +161,54 @@ const issueVolunteerOtp = async (volunteer) => {
         limited: false,
         expiryMinutes: otpExpiryMinutes,
         remaining: Math.max(0, OTP_MAX_SEND_PER_DAY - Number(volunteer?.email_otp_daily_count || 0)),
+    };
+};
+
+const issueVolunteerPasswordResetOtp = async (volunteer) => {
+    const otpLimitMeta = getPasswordResetOtpLimitMeta(volunteer);
+
+    if (otpLimitMeta.limited) {
+        return {
+            success: false,
+            limited: true,
+            retryAt: otpLimitMeta.retryAt,
+            remaining: otpLimitMeta.remaining,
+        };
+    }
+
+    const otpCode = String(crypto.randomInt(100000, 1000000));
+    const otpExpiryMinutes = getOtpExpiryMinutes();
+
+    volunteer.password_reset_otp = otpCode;
+    volunteer.password_reset_otp_verified = false;
+    volunteer.password_reset_otp_verified_at = null;
+    volunteer.password_reset_otp_expires_at = new Date(Date.now() + otpExpiryMinutes * 60 * 1000);
+    volunteer.password_reset_otp_daily_count = Number(volunteer?.password_reset_otp_daily_count || 0) + 1;
+
+    await volunteer.save();
+
+    try {
+        await sendVolunteerOtpEmail({
+            email: volunteer.email,
+            otpCode,
+            expiryMinutes: otpExpiryMinutes,
+            purpose: OTP_EMAIL_PURPOSE.RESET_PASSWORD,
+        });
+    } catch (error) {
+        volunteer.password_reset_otp = null;
+        volunteer.password_reset_otp_expires_at = null;
+        volunteer.password_reset_otp_verified = false;
+        volunteer.password_reset_otp_verified_at = null;
+        volunteer.password_reset_otp_daily_count = Math.max(0, Number(volunteer?.password_reset_otp_daily_count || 1) - 1);
+        await volunteer.save();
+        throw error;
+    }
+
+    return {
+        success: true,
+        limited: false,
+        expiryMinutes: otpExpiryMinutes,
+        remaining: Math.max(0, PASSWORD_RESET_OTP_MAX_SEND_PER_DAY - Number(volunteer?.password_reset_otp_daily_count || 0)),
     };
 };
 
@@ -439,6 +530,169 @@ export const resendVolunteerOtpController = async(req,res)=>{
             "OTP sent to your email.",
             otpMeta
         );
+    } catch (error) {
+        return res.status(500).json({success:false,message:"Internal server error"});
+    }
+}
+
+export const sendVolunteerForgotPasswordOtpController = async (req, res) => {
+    try {
+        const { email } = req.body;
+        const normalizedEmail = normalizeEmail(email);
+
+        if (!normalizedEmail) {
+            return res.status(400).json({ success: false, message: "Email is required" });
+        }
+
+        const volunteer = await findVolunteerByEmail(normalizedEmail);
+        if (!volunteer) {
+            return res.status(404).json({ success: false, message: "Volunteer account not found" });
+        }
+
+        if (!isVolunteerEmailOtpVerified(volunteer)) {
+            return res.status(403).json({
+                success: false,
+                message: "Email is not verified yet. Please verify signup OTP first.",
+            });
+        }
+
+        let otpMeta = null;
+        try {
+            otpMeta = await issueVolunteerPasswordResetOtp(volunteer);
+        } catch (error) {
+            console.error("Volunteer forgot-password OTP send failed:", error?.message || error);
+            return res.status(500).json({
+                success: false,
+                message: "Unable to send OTP email right now. Please check email service setup.",
+            });
+        }
+
+        if (otpMeta.limited) {
+            return sendOtpLimitError(res, otpMeta.retryAt);
+        }
+
+        return res.status(200).json({
+            success: true,
+            email: normalizedEmail,
+            message: "Password reset OTP sent to your email.",
+            otpExpiresInMinutes: otpMeta.expiryMinutes,
+            otpSendRemaining: otpMeta.remaining,
+        });
+    } catch (error) {
+        return res.status(500).json({success:false,message:"Internal server error"});
+    }
+}
+
+export const verifyVolunteerForgotPasswordOtpController = async (req, res) => {
+    try {
+        const { email, otp } = req.body;
+        const normalizedEmail = normalizeEmail(email);
+        const normalizedOtp = String(otp || "").trim();
+
+        if (!normalizedEmail || !normalizedOtp) {
+            return res.status(400).json({ success: false, message: "Email and OTP are required" });
+        }
+
+        const volunteer = await findVolunteerByEmail(normalizedEmail);
+        if (!volunteer) {
+            return res.status(404).json({ success: false, message: "Volunteer account not found" });
+        }
+
+        const expiresAtMs = volunteer?.password_reset_otp_expires_at
+            ? new Date(volunteer.password_reset_otp_expires_at).getTime()
+            : 0;
+
+        if (!volunteer?.password_reset_otp || !Number.isFinite(expiresAtMs) || Date.now() > expiresAtMs) {
+            return res.status(400).json({
+                success: false,
+                message: "OTP has expired. Please request a new OTP.",
+            });
+        }
+
+        if (String(volunteer.password_reset_otp) !== normalizedOtp) {
+            return res.status(400).json({ success: false, message: "Invalid OTP" });
+        }
+
+        volunteer.password_reset_otp = null;
+        volunteer.password_reset_otp_expires_at = null;
+        volunteer.password_reset_otp_verified = true;
+        volunteer.password_reset_otp_verified_at = new Date();
+        await volunteer.save();
+
+        const resetSessionToken = createVolunteerPasswordResetToken(normalizedEmail);
+
+        return res.status(200).json({
+            success: true,
+            message: "OTP verified successfully",
+            resetSessionToken,
+            resetSessionExpiresInMinutes: Math.floor(PASSWORD_RESET_SESSION_WINDOW_MS / (60 * 1000)),
+        });
+    } catch (error) {
+        return res.status(500).json({success:false,message:"Internal server error"});
+    }
+}
+
+export const resetVolunteerForgotPasswordController = async (req, res) => {
+    try {
+        const { email, newPassword, resetSessionToken } = req.body;
+        const normalizedEmail = normalizeEmail(email);
+
+        if (!normalizedEmail || !newPassword || !resetSessionToken) {
+            return res.status(400).json({
+                success: false,
+                message: "Email, new password and reset session token are required",
+            });
+        }
+
+        let resetPayload;
+        try {
+            resetPayload = verifyVolunteerPasswordResetToken(resetSessionToken);
+        } catch (_error) {
+            return res.status(401).json({ success: false, message: "Invalid or expired reset session" });
+        }
+
+        if (normalizeEmail(resetPayload?.email) !== normalizedEmail) {
+            return res.status(401).json({ success: false, message: "Invalid reset session for this email" });
+        }
+
+        const volunteer = await findVolunteerByEmail(normalizedEmail);
+        if (!volunteer) {
+            return res.status(404).json({ success: false, message: "Volunteer account not found" });
+        }
+
+        const verifiedAtMs = volunteer?.password_reset_otp_verified_at
+            ? new Date(volunteer.password_reset_otp_verified_at).getTime()
+            : 0;
+
+        if (!volunteer?.password_reset_otp_verified || !Number.isFinite(verifiedAtMs)) {
+            return res.status(400).json({ success: false, message: "Please verify OTP before resetting password" });
+        }
+
+        if (Date.now() - verifiedAtMs > PASSWORD_RESET_SESSION_WINDOW_MS) {
+            volunteer.password_reset_otp_verified = false;
+            volunteer.password_reset_otp_verified_at = null;
+            await volunteer.save();
+
+            return res.status(400).json({
+                success: false,
+                message: "Reset session expired. Please verify OTP again.",
+            });
+        }
+
+        const salt = await bcryptjs.genSalt(10);
+        const hashedPassword = await bcryptjs.hash(newPassword, salt);
+
+        volunteer.password = hashedPassword;
+        volunteer.password_reset_otp = null;
+        volunteer.password_reset_otp_expires_at = null;
+        volunteer.password_reset_otp_verified = false;
+        volunteer.password_reset_otp_verified_at = null;
+        await volunteer.save();
+
+        return res.status(200).json({
+            success: true,
+            message: "Password updated successfully. Please login again.",
+        });
     } catch (error) {
         return res.status(500).json({success:false,message:"Internal server error"});
     }

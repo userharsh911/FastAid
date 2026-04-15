@@ -88,6 +88,30 @@ const volunteerSchema = new mongoose.Schema({
     email_otp_daily_reset_at: {
         type: Date,
         default: null,
+    },
+    password_reset_otp: {
+        type: String,
+        default: null,
+    },
+    password_reset_otp_expires_at: {
+        type: Date,
+        default: null,
+    },
+    password_reset_otp_verified: {
+        type: Boolean,
+        default: false,
+    },
+    password_reset_otp_verified_at: {
+        type: Date,
+        default: null,
+    },
+    password_reset_otp_daily_count: {
+        type: Number,
+        default: 0,
+    },
+    password_reset_otp_daily_reset_at: {
+        type: Date,
+        default: null,
     }
 },{timestamps:true});
 
