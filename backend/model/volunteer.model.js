@@ -81,11 +81,11 @@ const volunteerSchema = new mongoose.Schema({
         type: Date,
         default: null,
     },
-    email_otp_daily_count: {
+    otp_daily_count: {
         type: Number,
         default: 0,
     },
-    email_otp_daily_reset_at: {
+    otp_daily_reset_at: {
         type: Date,
         default: null,
     },
@@ -105,14 +105,7 @@ const volunteerSchema = new mongoose.Schema({
         type: Date,
         default: null,
     },
-    password_reset_otp_daily_count: {
-        type: Number,
-        default: 0,
-    },
-    password_reset_otp_daily_reset_at: {
-        type: Date,
-        default: null,
-    }
+    
 },{timestamps:true});
 
 volunteerSchema.index({location:"2dsphere"});

@@ -6,7 +6,6 @@ import bcryptjs from "bcryptjs"
 import crypto from "crypto";
 
 const OTP_MAX_SEND_PER_DAY = 3;
-const PASSWORD_RESET_OTP_MAX_SEND_PER_DAY = 3;
 const OTP_WINDOW_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_OTP_EXPIRY_MINUTES = 10;
 const PASSWORD_RESET_SESSION_WINDOW_MS = 15 * 60 * 1000;
@@ -43,6 +42,10 @@ const toVolunteerResponse = (volunteer) => {
     delete volunteerResponse.password;
     delete volunteerResponse.email_otp;
     delete volunteerResponse.email_otp_expires_at;
+    delete volunteerResponse.otp_daily_count;
+    delete volunteerResponse.otp_daily_reset_at;
+
+    // Backward compatibility for older documents that used separate counters.
     delete volunteerResponse.email_otp_daily_count;
     delete volunteerResponse.email_otp_daily_reset_at;
     delete volunteerResponse.password_reset_otp;
@@ -55,22 +58,22 @@ const toVolunteerResponse = (volunteer) => {
     return volunteerResponse;
 };
 
-const ensureOtpWindow = (volunteer) => {
+const ensureSharedOtpWindow = (volunteer) => {
     const nowMs = Date.now();
-    const resetAtMs = volunteer?.email_otp_daily_reset_at
-        ? new Date(volunteer.email_otp_daily_reset_at).getTime()
+    const resetAtMs = volunteer?.otp_daily_reset_at
+        ? new Date(volunteer.otp_daily_reset_at).getTime()
         : 0;
 
     if (!Number.isFinite(resetAtMs) || nowMs >= resetAtMs) {
-        volunteer.email_otp_daily_count = 0;
-        volunteer.email_otp_daily_reset_at = new Date(nowMs + OTP_WINDOW_MS);
+        volunteer.otp_daily_count = 0;
+        volunteer.otp_daily_reset_at = new Date(nowMs + OTP_WINDOW_MS);
     }
 };
 
-const getOtpLimitMeta = (volunteer) => {
-    ensureOtpWindow(volunteer);
+const getSharedOtpLimitMeta = (volunteer) => {
+    ensureSharedOtpWindow(volunteer);
 
-    const currentCount = Number(volunteer?.email_otp_daily_count || 0);
+    const currentCount = Number(volunteer?.otp_daily_count || 0);
     const remaining = Math.max(0, OTP_MAX_SEND_PER_DAY - currentCount);
 
     if (remaining > 0) {
@@ -83,44 +86,12 @@ const getOtpLimitMeta = (volunteer) => {
     return {
         limited: true,
         remaining: 0,
-        retryAt: volunteer?.email_otp_daily_reset_at,
-    };
-};
-
-const ensurePasswordResetOtpWindow = (volunteer) => {
-    const nowMs = Date.now();
-    const resetAtMs = volunteer?.password_reset_otp_daily_reset_at
-        ? new Date(volunteer.password_reset_otp_daily_reset_at).getTime()
-        : 0;
-
-    if (!Number.isFinite(resetAtMs) || nowMs >= resetAtMs) {
-        volunteer.password_reset_otp_daily_count = 0;
-        volunteer.password_reset_otp_daily_reset_at = new Date(nowMs + OTP_WINDOW_MS);
-    }
-};
-
-const getPasswordResetOtpLimitMeta = (volunteer) => {
-    ensurePasswordResetOtpWindow(volunteer);
-
-    const currentCount = Number(volunteer?.password_reset_otp_daily_count || 0);
-    const remaining = Math.max(0, PASSWORD_RESET_OTP_MAX_SEND_PER_DAY - currentCount);
-
-    if (remaining > 0) {
-        return {
-            limited: false,
-            remaining,
-        };
-    }
-
-    return {
-        limited: true,
-        remaining: 0,
-        retryAt: volunteer?.password_reset_otp_daily_reset_at,
+        retryAt: volunteer?.otp_daily_reset_at,
     };
 };
 
 const issueVolunteerOtp = async (volunteer) => {
-    const otpLimitMeta = getOtpLimitMeta(volunteer);
+    const otpLimitMeta = getSharedOtpLimitMeta(volunteer);
 
     if (otpLimitMeta.limited) {
         return {
@@ -137,7 +108,7 @@ const issueVolunteerOtp = async (volunteer) => {
     volunteer.email_otp = otpCode;
     volunteer.email_otp_verified = false;
     volunteer.email_otp_expires_at = new Date(Date.now() + otpExpiryMinutes * 60 * 1000);
-    volunteer.email_otp_daily_count = Number(volunteer?.email_otp_daily_count || 0) + 1;
+    volunteer.otp_daily_count = Number(volunteer?.otp_daily_count || 0) + 1;
 
     await volunteer.save();
 
@@ -150,7 +121,7 @@ const issueVolunteerOtp = async (volunteer) => {
     } catch (error) {
         volunteer.email_otp = null;
         volunteer.email_otp_expires_at = null;
-        volunteer.email_otp_daily_count = Math.max(0, Number(volunteer?.email_otp_daily_count || 1) - 1);
+        volunteer.otp_daily_count = Math.max(0, Number(volunteer?.otp_daily_count || 1) - 1);
         await volunteer.save();
 
         throw error;
@@ -160,12 +131,12 @@ const issueVolunteerOtp = async (volunteer) => {
         success: true,
         limited: false,
         expiryMinutes: otpExpiryMinutes,
-        remaining: Math.max(0, OTP_MAX_SEND_PER_DAY - Number(volunteer?.email_otp_daily_count || 0)),
+        remaining: Math.max(0, OTP_MAX_SEND_PER_DAY - Number(volunteer?.otp_daily_count || 0)),
     };
 };
 
 const issueVolunteerPasswordResetOtp = async (volunteer) => {
-    const otpLimitMeta = getPasswordResetOtpLimitMeta(volunteer);
+    const otpLimitMeta = getSharedOtpLimitMeta(volunteer);
 
     if (otpLimitMeta.limited) {
         return {
@@ -183,7 +154,7 @@ const issueVolunteerPasswordResetOtp = async (volunteer) => {
     volunteer.password_reset_otp_verified = false;
     volunteer.password_reset_otp_verified_at = null;
     volunteer.password_reset_otp_expires_at = new Date(Date.now() + otpExpiryMinutes * 60 * 1000);
-    volunteer.password_reset_otp_daily_count = Number(volunteer?.password_reset_otp_daily_count || 0) + 1;
+    volunteer.otp_daily_count = Number(volunteer?.otp_daily_count || 0) + 1;
 
     await volunteer.save();
 
@@ -199,7 +170,7 @@ const issueVolunteerPasswordResetOtp = async (volunteer) => {
         volunteer.password_reset_otp_expires_at = null;
         volunteer.password_reset_otp_verified = false;
         volunteer.password_reset_otp_verified_at = null;
-        volunteer.password_reset_otp_daily_count = Math.max(0, Number(volunteer?.password_reset_otp_daily_count || 1) - 1);
+        volunteer.otp_daily_count = Math.max(0, Number(volunteer?.otp_daily_count || 1) - 1);
         await volunteer.save();
         throw error;
     }
@@ -208,7 +179,7 @@ const issueVolunteerPasswordResetOtp = async (volunteer) => {
         success: true,
         limited: false,
         expiryMinutes: otpExpiryMinutes,
-        remaining: Math.max(0, PASSWORD_RESET_OTP_MAX_SEND_PER_DAY - Number(volunteer?.password_reset_otp_daily_count || 0)),
+        remaining: Math.max(0, OTP_MAX_SEND_PER_DAY - Number(volunteer?.otp_daily_count || 0)),
     };
 };
 
